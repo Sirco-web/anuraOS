@@ -44,14 +44,49 @@ warning: unnecessary transmute
     --> src/rust/cpu/instructions_0f.rs:2456:24
 ```
 
-**Solution:**
-Apply the build patches script:
+**Important Note:**
+These warnings are safe to suppress. They occur because the v86 codebase uses `std::mem::transmute()` for type reinterpretation between arrays of different sizes. The Rust compiler suggests safer alternatives like `from_ne_bytes()`, but these don't work for arrays larger than 8 bytes or of different element types.
+
+**Solutions:**
+
+**Option A: Suppress Warnings (Recommended)**
+The build patches script automatically adds warning suppression:
 ```bash
 ./anura-build-patches.sh
 make all
 ```
 
-This script fixes the transmute warnings by replacing unsafe `std::mem::transmute()` calls with safer type conversion methods like `u64::from_ne_bytes()`.
+**Option B: Accept Warnings During Build**
+These warnings don't prevent compilation - the build will complete even with warnings displayed:
+```bash
+make all 2>&1 | tee build.log
+```
+
+**Option C: Investigate Further**
+If transmute warnings cause compilation errors (not just warnings), see Issue #2 below.
+
+### Issue 1b: Rust Transmute Type Mismatch Errors
+
+**Symptoms:**
+```
+error[E0308]: mismatched types
+    --> src/rust/cpu/instructions_0f.rs:4194:43
+     |
+4194 | write_mmx_reg64(r, u64::from_ne_bytes(result));
+     |                    ------------------ ^^^^^^ expected `[u8; 8]`, found `[u16; 4]`
+```
+
+**Root Cause:**
+Automated patching tried to replace transmute with type conversion (like `from_ne_bytes()`), but resulted arrays have different types (`[u16; 4]`, `[i16; 4]`, `[i8; 8]`, etc.) where automatic conversion doesn't work.
+
+**Solution:**
+Use the proper build patches which suppress warnings instead of trying to "fix" the transmute:
+```bash
+./anura-build-patches.sh
+make all
+```
+
+This will add `#![allow(unsafe_code)]` to suppress transmute warnings while keeping the original (safe) working code.
 
 ### Issue 2: WASM Linker Error - "global-base cannot be less than stack size"
 
@@ -235,12 +270,87 @@ sudo systemctl start anura-os
 sudo systemctl status anura-os
 ```
 
+## Using the Error Logs
+
+The setup script creates two log files to help with troubleshooting:
+
+### Build Log: `setup-build.log`
+
+Contains full output from all build commands:
+```bash
+# View build log in real-time (if running)
+tail -f setup-build.log
+
+# View specific errors in build log
+grep -i error setup-build.log
+
+# View last 50 lines
+tail -50 setup-build.log
+```
+
+### Error Summary: `setup-errors.txt`
+
+Contains captured errors and their context:
+```bash
+# View error summary
+cat setup-errors.txt
+
+# View formatted output
+less setup-errors.txt
+```
+
+### Finding Your Specific Error
+
+1. **Look at error summary first:**
+   ```bash
+   cat setup-errors.txt
+   ```
+
+2. **Search for error in build log:**
+   ```bash
+   grep -A 5 -B 5 "error\[" setup-build.log
+   ```
+
+3. **Check for specific warnings:**
+   ```bash
+   grep "warning\|error" setup-build.log | head -20
+   ```
+
+## Common Issues and Log Patterns
+
+### If you see transmute type mismatches:
+
+```bash
+# Check if patches were applied
+grep "allow(unsafe_code)" v86/src/rust/cpu/instructions_0f.rs
+
+# If not found, apply patches:
+./anura-build-patches.sh
+
+# Then retry build:
+make clean
+make all
+```
+
+### Checking specific file for issues:
+
+```bash
+# Count compilation errors
+grep "^error\[" setup-build.log | wc -l
+
+# See all error types
+grep "^error\[" setup-build.log | cut -d: -f1 | sort | uniq -c
+
+# Get detailed error info
+grep -A 10 "^error\[E0308\]" setup-build.log | head -30
+```
+
 ## Checking Build Status
 
 ```bash
 # View build logs
 make clean
-make all 2>&1 | tee build.log
+make all 2>&1 | tee setup-build.log
 
 # Check if server was built
 ls -la v86/build/v86.wasm

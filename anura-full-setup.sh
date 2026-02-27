@@ -86,7 +86,18 @@ detect_os() {
 
 # Main setup
 main() {
+    # Setup error logging
+    local error_log="setup-errors.txt"
+    local build_log="setup-build.log"
+    
+    # Clear previous logs
+    > "$error_log"
+    > "$build_log"
+    
     log_info "Starting Anura OS Full Setup..."
+    log_info "Error log: $error_log"
+    log_info "Build log: $build_log"
+    echo ""
     
     # Check prerequisites
     detect_os
@@ -227,17 +238,36 @@ main() {
     apply_build_patches
     
     log_info "Step 9: Building Anura OS..."
-    if ! make all; then
+    if ! make all 2>&1 | tee -a "$build_log"; then
         log_warn "Initial build failed. Attempting with build patches..."
+        echo "" >> "$error_log"
+        echo "========== INITIAL BUILD FAILURE ==========" >> "$error_log"
+        tail -100 "$build_log" >> "$error_log"
+        
         if [[ -x "./anura-build-patches.sh" ]]; then
-            ./anura-build-patches.sh
+            log_info "Running anura-build-patches.sh..."
+            if ! ./anura-build-patches.sh 2>&1 | tee -a "$build_log"; then
+                echo "" >> "$error_log"
+                echo "========== PATCH SCRIPT FAILURE ==========" >> "$error_log"
+                tail -50 "$build_log" >> "$error_log"
+                log_warn "Some patches may have failed, but continuing anyway..."
+            fi
+            
             log_info "Retrying build with patches applied..."
-            if ! make all; then
+            if ! make all 2>&1 | tee -a "$build_log"; then
+                echo "" >> "$error_log"
+                echo "========== RETRY BUILD FAILURE ==========" >> "$error_log"
+                tail -100 "$build_log" >> "$error_log"
+                
                 log_error "Build failed even with patches. Check the error messages above."
-                log_info "You can try manually patching the Rust files or check v86 submodule status."
+                log_info "Full build log: $build_log"
+                log_info "Error summary: $error_log"
+                log_info "You can try manually running: ./anura-build-patches.sh && make all"
                 exit 1
             fi
         else
+            echo "" >> "$error_log"
+            echo "========== PATCH SCRIPT NOT FOUND ==========" >> "$error_log"
             log_error "Build failed and patch script not found. Installation cannot continue."
             exit 1
         fi
@@ -266,6 +296,10 @@ main() {
     echo "Anura OS has been fully set up on your $OS_NAME system."
     echo "All dependencies have been installed."
     echo "The server has been built and is ready to run."
+    echo ""
+    log_info "Log files:"
+    echo "- Build log: setup-build.log"
+    echo "- Error log (if any): setup-errors.txt"
     echo ""
     log_info "Next steps:"
     echo "1. Run the server manually: npm start (from the server directory)"
@@ -434,31 +468,61 @@ trap 'on_error $? $LINENO' ERR
 on_error() {
     local exit_code=$1
     local line_number=$2
+    local error_log="setup-errors.txt"
+    local build_log="setup-build.log"
+    
     log_error "Setup failed at line $line_number with exit code $exit_code"
+    
+    # Log the error
+    {
+        echo "========== SETUP SCRIPT ERROR =========="
+        echo "Line: $line_number"
+        echo "Exit Code: $exit_code"
+        echo "Timestamp: $(date)"
+        echo ""
+        echo "Last 20 lines of build log:"
+        tail -20 "$build_log" 2>/dev/null || echo "Build log not available"
+    } >> "$error_log"
+    
     echo ""
     log_warn "Common solutions:"
     echo "1. Check SETUP_TROUBLESHOOTING.md for your specific issue"
-    echo "2. Run: ./anura-build-patches.sh"
-    echo "3. Check available disk space: df -h"
-    echo "4. Run: git submodule update --init --recursive"
+    echo "2. Check build log: cat $build_log"
+    echo "3. Check error summary: cat $error_log"
+    echo "4. Run: ./anura-build-patches.sh"
+    echo "5. Check available disk space: df -h"
+    echo "6. Run: git submodule update --init --recursive"
     echo ""
     log_info "To retry the setup:"
     echo "  sudo ./anura-full-setup.sh"
     echo ""
     log_info "For manual steps:"
     echo "  See SETUP_TROUBLESHOOTING.md 'Manual Steps' section"
+    
+    # Show snippet of the error
+    if [[ -f "$error_log" ]]; then
+        echo ""
+        log_info "Error details (last 15 lines):"
+        tail -15 "$error_log" | sed 's/^/  /'
+    fi
+    
     exit $exit_code
 }
 
 # Function to apply build patches for known issues
 apply_build_patches() {
-    log_info "Applying build patches for known issues..."
+    log_info "Preparing build patches for known issues..."
     
     # Try to run the dedicated patches script if it exists
     if [[ -x "./anura-build-patches.sh" ]]; then
         log_info "Running anura-build-patches.sh..."
-        ./anura-build-patches.sh || log_warn "Some patches may have failed, but continuing anyway..."
-        return $?
+        if ./anura-build-patches.sh; then
+            log_success "Build patches successfully applied"
+            return 0
+        else
+            log_warn "Some patches failed, but this might be okay..."
+            return 0
+        fi
     fi
     
     # Fallback: apply inline patches
@@ -468,11 +532,13 @@ apply_build_patches() {
         # Set environment for known WASM linker issue
         if grep -r "stack-first" v86/ 2>/dev/null | grep -q "global-base"; then
             log_warn "Detected WASM linker stack-first/global-base conflict"
-            log_info "This may require manual intervention or increasing stack-size..."
+            log_info "Setting environment workaround..."
+            export RUSTFLAGS="${RUSTFLAGS:- } -C link-args=-z -C link-args=stack-size=1048576"
         fi
     fi
     
     log_success "Build patch preparation complete"
+    return 0
 }
 
 # Run main

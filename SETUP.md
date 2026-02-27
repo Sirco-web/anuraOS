@@ -139,10 +139,17 @@ cd server && npm install && cd ..
 ## Troubleshooting
 
 ### Build Fails
-1. Check `SETUP_TROUBLESHOOTING.md`
+1. Check error logs:
+   ```bash
+   cat setup-errors.txt        # Quick error summary
+   tail -50 setup-build.log   # See last build output
+   ```
 2. Run: `./anura-build-patches.sh`
 3. Verify disk space: `df -h`
 4. Check internet connection (for downloads)
+
+### For detailed error analysis:
+See [ERROR_LOG_GUIDE.md](ERROR_LOG_GUIDE.md) for comprehensive logging documentation
 
 ### Systemd Service Issues
 ```bash
