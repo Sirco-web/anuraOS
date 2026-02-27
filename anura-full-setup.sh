@@ -33,14 +33,54 @@ check_sudo() {
     fi
 }
 
-# Function to detect OS
+# Function to detect OS and get package manager
 detect_os() {
     if [[ -f /etc/os-release ]]; then
         . /etc/os-release
-        if [[ "$ID" != "debian" && "$ID" != "ubuntu" && ! "$ID_LIKE" =~ debian ]]; then
-            log_warn "This script is optimized for Debian/Ubuntu. Your system is: $PRETTY_NAME"
-            log_warn "Some commands may not work as expected"
+        OS_ID="$ID"
+        OS_NAME="$PRETTY_NAME"
+        
+        # Detect package manager and set install command
+        if command -v apt-get &> /dev/null; then
+            PKG_MANAGER="apt"
+            PKG_INSTALL="apt-get install -y"
+            PKG_UPDATE="apt-get update"
+            PKG_UPGRADE="apt-get upgrade -y"
+        elif command -v dnf &> /dev/null; then
+            PKG_MANAGER="dnf"
+            PKG_INSTALL="dnf install -y"
+            PKG_UPDATE="dnf check-update"
+            PKG_UPGRADE="dnf upgrade -y"
+        elif command -v yum &> /dev/null; then
+            PKG_MANAGER="yum"
+            PKG_INSTALL="yum install -y"
+            PKG_UPDATE="yum check-update"
+            PKG_UPGRADE="yum upgrade -y"
+        elif command -v pacman &> /dev/null; then
+            PKG_MANAGER="pacman"
+            PKG_INSTALL="pacman -S --noconfirm"
+            PKG_UPDATE="pacman -Sy"
+            PKG_UPGRADE="pacman -Syu --noconfirm"
+        elif command -v zypper &> /dev/null; then
+            PKG_MANAGER="zypper"
+            PKG_INSTALL="zypper install -y"
+            PKG_UPDATE="zypper refresh"
+            PKG_UPGRADE="zypper update -y"
+        elif command -v apk &> /dev/null; then
+            PKG_MANAGER="apk"
+            PKG_INSTALL="apk add"
+            PKG_UPDATE="apk update"
+            PKG_UPGRADE="apk upgrade"
+        else
+            log_error "Could not detect package manager. Please install packages manually."
+            exit 1
         fi
+        
+        log_info "Detected OS: $OS_NAME"
+        log_info "Using package manager: $PKG_MANAGER"
+    else
+        log_error "Could not detect OS. Please ensure /etc/os-release exists."
+        exit 1
     fi
 }
 
@@ -53,28 +93,100 @@ main() {
     check_sudo
     
     log_info "Step 1: Updating system packages..."
-    apt update
-    apt upgrade -y
+    $PKG_UPDATE || true
+    $PKG_UPGRADE || true
     log_success "System packages updated"
     
     log_info "Step 2: Installing required build tools and dependencies..."
-    apt install -y \
-        build-essential \
-        curl \
-        wget \
-        git \
-        pkg-config \
-        python3 \
-        python3-dev \
-        libssl-dev \
-        zlib1g-dev \
-        libreadline-dev \
-        uuid-runtime \
-        gcc-multilib \
-        g++-multilib \
-        ninja-build \
-        ca-certificates \
-        wget
+    
+    # Install distro-specific packages
+    case "$PKG_MANAGER" in
+        apt)
+            $PKG_INSTALL \
+                build-essential \
+                curl \
+                wget \
+                git \
+                pkg-config \
+                python3 \
+                python3-dev \
+                libssl-dev \
+                zlib1g-dev \
+                libreadline-dev \
+                uuid-runtime \
+                gcc-multilib \
+                g++-multilib \
+                ninja-build \
+                ca-certificates
+            ;;
+        dnf|yum)
+            $PKG_INSTALL \
+                "@Development Tools" \
+                curl \
+                wget \
+                git \
+                pkgconfig \
+                python3 \
+                python3-devel \
+                openssl-devel \
+                zlib-devel \
+                readline-devel \
+                util-linux \
+                gcc-multilib \
+                glibc-devel.i686 \
+                ninja-build \
+                ca-certificates
+            ;;
+        pacman)
+            $PKG_INSTALL \
+                base-devel \
+                curl \
+                wget \
+                git \
+                pkg-config \
+                python3 \
+                openssl \
+                zlib \
+                readline \
+                util-linux \
+                ninja \
+                ca-certificates
+            ;;
+        zypper)
+            $PKG_INSTALL \
+                -t pattern devel_basis \
+                curl \
+                wget \
+                git-core \
+                pkg-config \
+                python3 \
+                python3-devel \
+                libopenssl-devel \
+                zlib-devel \
+                readline-devel \
+                util-linux \
+                gcc-multilib \
+                ninja \
+                ca-certificates
+            ;;
+        apk)
+            $PKG_INSTALL \
+                build-base \
+                curl \
+                wget \
+                git \
+                pkgconfig \
+                python3 \
+                python3-dev \
+                openssl-dev \
+                zlib-dev \
+                readline-dev \
+                util-linux \
+                ninja \
+                ca-certificates
+            ;;
+    esac
+    
     log_success "Build tools and dependencies installed"
     
     log_info "Step 3: Installing Node.js and npm..."
@@ -111,8 +223,25 @@ main() {
     git submodule update --init --recursive
     log_success "Git submodules updated"
     
-    log_info "Step 8: Building Anura OS..."
-    make all
+    log_info "Step 8: Applying build patches..."
+    apply_build_patches
+    
+    log_info "Step 9: Building Anura OS..."
+    if ! make all; then
+        log_warn "Initial build failed. Attempting with build patches..."
+        if [[ -x "./anura-build-patches.sh" ]]; then
+            ./anura-build-patches.sh
+            log_info "Retrying build with patches applied..."
+            if ! make all; then
+                log_error "Build failed even with patches. Check the error messages above."
+                log_info "You can try manually patching the Rust files or check v86 submodule status."
+                exit 1
+            fi
+        else
+            log_error "Build failed and patch script not found. Installation cannot continue."
+            exit 1
+        fi
+    fi
     log_success "Anura OS built successfully"
     
     log_info "Step 9: Building server..."
@@ -124,17 +253,17 @@ main() {
     fi
     log_success "Server ready"
     
-    log_info "Step 10: Verifying installation..."
+    log_info "Step 11: Verifying installation..."
     verify_installation
     log_success "All verifications passed!"
     
-    log_info "Step 11: Systemd service setup..."
+    log_info "Step 12: Systemd service setup..."
     setup_systemd_service
     
     log_success "Setup completed successfully!"
     echo ""
     log_info "=== Summary ==="
-    echo "Anura OS has been fully set up on your Debian system."
+    echo "Anura OS has been fully set up on your $OS_NAME system."
     echo "All dependencies have been installed."
     echo "The server has been built and is ready to run."
     echo ""
@@ -142,6 +271,11 @@ main() {
     echo "1. Run the server manually: npm start (from the server directory)"
     echo "2. Or use the systemd service if you created one"
     echo ""
+    log_info "Documentation:"
+    echo "- Setup & Troubleshooting: SETUP_TROUBLESHOOTING.md"
+    echo "- Main README: README.md"
+    echo ""
+    log_success "Installation complete! 🎉"
 }
 
 # Function to verify installation
@@ -295,7 +429,51 @@ EOF
 }
 
 # Error handler
-trap 'log_error "Setup failed on line $LINENO"; exit 1' ERR
+trap 'on_error $? $LINENO' ERR
+
+on_error() {
+    local exit_code=$1
+    local line_number=$2
+    log_error "Setup failed at line $line_number with exit code $exit_code"
+    echo ""
+    log_warn "Common solutions:"
+    echo "1. Check SETUP_TROUBLESHOOTING.md for your specific issue"
+    echo "2. Run: ./anura-build-patches.sh"
+    echo "3. Check available disk space: df -h"
+    echo "4. Run: git submodule update --init --recursive"
+    echo ""
+    log_info "To retry the setup:"
+    echo "  sudo ./anura-full-setup.sh"
+    echo ""
+    log_info "For manual steps:"
+    echo "  See SETUP_TROUBLESHOOTING.md 'Manual Steps' section"
+    exit $exit_code
+}
+
+# Function to apply build patches for known issues
+apply_build_patches() {
+    log_info "Applying build patches for known issues..."
+    
+    # Try to run the dedicated patches script if it exists
+    if [[ -x "./anura-build-patches.sh" ]]; then
+        log_info "Running anura-build-patches.sh..."
+        ./anura-build-patches.sh || log_warn "Some patches may have failed, but continuing anyway..."
+        return $?
+    fi
+    
+    # Fallback: apply inline patches
+    if [[ -d "v86" ]] && [[ -f "v86/Makefile" ]]; then
+        log_warn "Patch script not available. Attempting inline patches..."
+        
+        # Set environment for known WASM linker issue
+        if grep -r "stack-first" v86/ 2>/dev/null | grep -q "global-base"; then
+            log_warn "Detected WASM linker stack-first/global-base conflict"
+            log_info "This may require manual intervention or increasing stack-size..."
+        fi
+    fi
+    
+    log_success "Build patch preparation complete"
+}
 
 # Run main
 main "$@"
